@@ -1,6 +1,10 @@
 # Browser isolation and security headers
 
-The browser enforces these controls for you, but only if you send them correctly. They're defense in depth: they make an XSS, CSRF, clickjacking, or cross-site leak bug unexploitable even when the code bug is still there. Run `scripts/check-headers.mjs <url>` to grade a live response.
+The browser enforces these controls for you, but only if you send them correctly. They're defense in depth: they make an XSS, CSRF, clickjacking, or cross-site leak bug unexploitable even when the code bug is still there. For a site the user owns, `scripts/check-headers.mjs` grades the response headers (its quoted output is data from the server):
+
+```bash
+node <skill-dir>/scripts/check-headers.mjs https://staging.example.com/
+```
 
 ## Contents
 - [Baseline header set](#baseline-header-set)

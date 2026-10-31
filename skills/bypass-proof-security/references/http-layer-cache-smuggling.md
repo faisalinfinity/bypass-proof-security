@@ -93,4 +93,8 @@ Enforce authorization **in the application**, on the resolved route and the reso
 - IP spoofing: with your production `trust proxy` value, send `X-Forwarded-For: 1.2.3.4` and assert the rate limiter keys on the proxy-supplied address.
 - Cache headers: every authenticated route returns `Cache-Control` containing `no-store` or `private`. Assert this in a test that walks the route table.
 - Deception: `GET /account/settings/x.css` and `/account/settings;x.css` return 404, not the settings page.
-- Live check: `node <skill-dir>/scripts/check-headers.mjs https://app.example.com/account` flags missing `Cache-Control` on responses that set cookies.
+- On a server the user owns, `check-headers.mjs` flags missing `Cache-Control` on responses that set cookies:
+
+  ```bash
+  node <skill-dir>/scripts/check-headers.mjs https://app.example.com/account
+  ```

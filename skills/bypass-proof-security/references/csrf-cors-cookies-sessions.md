@@ -98,7 +98,12 @@ CORS_ALLOWED_ORIGINS = ["https://app.example.com"]   # avoid CORS_ALLOWED_ORIGIN
 
 If origins really are dynamic (customer custom domains), look each one up in the database by exact value. Don't pattern-match.
 
-Probe the policy function: `node <skill-dir>/scripts/probe-validator.mjs cors-origin src/cors.ts isAllowedOrigin`. Probe the live server: `node <skill-dir>/scripts/check-headers.mjs https://api.example.com/me` sends `Origin: https://websec-probe.invalid` and `Origin: null` and flags reflection.
+The policy function can be exercised locally, and a server the user owns can be checked for reflection. `check-headers.mjs` sends `Origin: https://websec-probe.invalid` and `Origin: null`:
+
+```bash
+node <skill-dir>/scripts/probe-validator.mjs cors-origin src/cors.ts isAllowedOrigin
+node <skill-dir>/scripts/check-headers.mjs https://api.example.com/me
+```
 
 ## WebSockets (CSWSH)
 
