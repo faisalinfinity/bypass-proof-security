@@ -1,6 +1,6 @@
 """Tests for the shipped Python helpers. Run:
-  uv run --python 3.9  --with pytest --with httpx pytest tests/web-security-fixes/python -q
-  uv run --python 3.13 --with pytest --with httpx pytest tests/web-security-fixes/python -q
+  uv run --python 3.9  --with pytest --with httpx pytest tests/bypass-proof-security/python -q
+  uv run --python 3.13 --with pytest --with httpx pytest tests/bypass-proof-security/python -q
 """
 import base64
 import hashlib
@@ -19,7 +19,7 @@ from urllib.parse import urlparse, parse_qs
 import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
-SKILL = ROOT / "skills" / "web-security-fixes"
+SKILL = ROOT / "skills" / "bypass-proof-security"
 sys.path.insert(0, str(SKILL / "assets" / "fixes" / "python"))
 
 from safe_fetch import SSRFBlocked, guarded_httpx_client, is_public_address, safe_get, validate_url  # noqa: E402

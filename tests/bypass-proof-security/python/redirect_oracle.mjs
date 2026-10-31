@@ -1,7 +1,7 @@
 // Reads [{input, output, kind, expect}] on stdin; resolves each output the way a browser does
 // (WHATWG URL against the corpus current_url) and prints the failures as JSON.
 import fs from 'node:fs';
-const corpus = JSON.parse(fs.readFileSync(new URL('../../../skills/web-security-fixes/assets/corpus/redirect.json', import.meta.url)));
+const corpus = JSON.parse(fs.readFileSync(new URL('../../../skills/bypass-proof-security/assets/corpus/redirect.json', import.meta.url)));
 const { current_url, allowed_origins } = corpus.assumptions;
 const rows = JSON.parse(fs.readFileSync(0, 'utf8'));
 const failures = [];

@@ -1,4 +1,4 @@
-// Security regression tests built from the web-security-fixes corpus (vitest; works with jest by swapping the import).
+// Security regression tests built from the bypass-proof-security corpus (vitest; works with jest by swapping the import).
 //
 // How to use:
 //   1. Copy this file into your test folder. Copy ../corpus/*.json next to it (tests/security/corpus/),

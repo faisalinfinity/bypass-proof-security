@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
-const CORPUS = fileURLToPath(new URL('../../skills/web-security-fixes/assets/corpus/', import.meta.url));
+const CORPUS = fileURLToPath(new URL('../../skills/bypass-proof-security/assets/corpus/', import.meta.url));
 const corpus = (n) => JSON.parse(fs.readFileSync(path.join(CORPUS, `${n}.json`), 'utf8'));
 const FINDINGS = ['redirect', 'ssrf', 'path', 'cors', 'jwt', 'webhook', 'proto', 'race'];
 const [runDir, only] = process.argv.slice(2);

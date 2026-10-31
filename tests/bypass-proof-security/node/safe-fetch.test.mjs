@@ -3,8 +3,8 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import dns from 'node:dns';
-import { runProbe, summarize } from '../../../skills/web-security-fixes/scripts/probe-validator.mjs';
-import { safeFetch, isPublicAddress } from '../../../skills/web-security-fixes/assets/fixes/node/safe-fetch.mjs';
+import { runProbe, summarize } from '../../../skills/bypass-proof-security/scripts/probe-validator.mjs';
+import { safeFetch, isPublicAddress } from '../../../skills/bypass-proof-security/assets/fixes/node/safe-fetch.mjs';
 
 // Two loopback servers = two origins. Tests opt into loopback with a custom address policy,
 // exactly how an app would allowlist one internal service, and then check the policy still
@@ -111,7 +111,7 @@ test('ssrf-fetch probe: validate-then-fetch is bypassed by rebinding; safeFetch 
 
 test('undici dispatcher variant passes the ssrf-fetch probe (if undici is installed)', async (t) => {
   let mod;
-  try { mod = await import('../../../skills/web-security-fixes/assets/fixes/node/safe-fetch-undici.mjs'); } catch (e) { t.skip(`undici not installed: ${e.message}`); return; }
+  try { mod = await import('../../../skills/bypass-proof-security/assets/fixes/node/safe-fetch-undici.mjs'); } catch (e) { t.skip(`undici not installed: ${e.message}`); return; }
   const { fetch: ufetch } = await import('undici');
   const agent = mod.createSsrfSafeAgent({ allowedPorts: null, connect: { timeout: 2500 } });
   for (const [name, f] of [['undici fetch', (u) => ufetch(u, { dispatcher: agent })], ['global fetch', (u) => fetch(u, { dispatcher: agent })]]) {

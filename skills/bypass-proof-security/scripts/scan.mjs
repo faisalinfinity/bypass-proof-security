@@ -354,7 +354,7 @@ function report(result) {
   const { findings } = result;
   const n = (s) => findings.filter((f) => f.severity === s).length;
   const out = [];
-  out.push(`# web-security-fixes scan: ${result.root}`);
+  out.push(`# bypass-proof-security scan: ${result.root}`);
   out.push(`Scanned ${result.files} files (${Object.entries(result.byLanguage).map(([k, v]) => `${k}: ${v}`).join(', ') || 'none'}) · ${new Set(RULES.map((r) => r.id)).size} rules · findings: 🔴 ${n('high')} high, 🟠 ${n('medium')} medium, ⚪ ${n('low')} low`);
   out.push('Candidates, not verdicts: confirm each location. Naive-fix findings mean a fix exists but probably does not hold.\n');
   for (const sev of ['high', 'medium', 'low']) {

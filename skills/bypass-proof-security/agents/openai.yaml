@@ -1,5 +1,5 @@
 interface:
-  display_name: "Web Security Fixes"
+  display_name: "Bypass-Proof Security"
   short_description: "Fix SSRF, XSS, CSRF/CORS, IDOR, injection, path traversal, JWT, webhook and race bugs so the fix holds against bypasses"
   brand_color: "#B91C1C"
   default_prompt: "Scan this codebase for security sinks and fixes that don't hold, then fix the real findings with regression tests that fail on the old code."

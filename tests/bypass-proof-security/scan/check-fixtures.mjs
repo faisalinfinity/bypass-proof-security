@@ -2,7 +2,7 @@
 // Usage: node check-fixtures.mjs <fixtures-dir>
 import fs from 'node:fs';
 import path from 'node:path';
-import { scan } from '../../../skills/web-security-fixes/scripts/scan.mjs';
+import { scan } from '../../../skills/bypass-proof-security/scripts/scan.mjs';
 const dir = path.resolve(process.argv[2]);
 const { findings } = scan(dir, {});
 const expected = [];

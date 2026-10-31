@@ -1,4 +1,4 @@
-"""Security regression tests built from the web-security-fixes corpus (pytest).
+"""Security regression tests built from the bypass-proof-security corpus (pytest).
 
 How to use:
   1. Copy this file into tests/security/ and copy ../corpus/*.json to tests/security/corpus/

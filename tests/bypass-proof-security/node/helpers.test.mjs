@@ -1,15 +1,15 @@
 // Tests for the shipped Node helpers AND the probe's oracles.
 // Every helper must pass its corpus; every "naive fix" (what agents typically write) must FAIL it.
-// Run: node --test tests/web-security-fixes/node/
+// Run: node --test tests/bypass-proof-security/node/
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import dns from 'node:dns';
-import { runProbe, summarize, loadCorpus } from '../../../skills/web-security-fixes/scripts/probe-validator.mjs';
-import { safeRedirectTarget } from '../../../skills/web-security-fixes/assets/fixes/node/safe-redirect.mjs';
-import { resolveInside, safeFilename } from '../../../skills/web-security-fixes/assets/fixes/node/safe-path.mjs';
-import { isPublicAddress, validateUrl } from '../../../skills/web-security-fixes/assets/fixes/node/safe-fetch.mjs';
-import { safeMerge, safeSet, safeJsonParse } from '../../../skills/web-security-fixes/assets/fixes/node/safe-merge.mjs';
+import { runProbe, summarize, loadCorpus } from '../../../skills/bypass-proof-security/scripts/probe-validator.mjs';
+import { safeRedirectTarget } from '../../../skills/bypass-proof-security/assets/fixes/node/safe-redirect.mjs';
+import { resolveInside, safeFilename } from '../../../skills/bypass-proof-security/assets/fixes/node/safe-path.mjs';
+import { isPublicAddress, validateUrl } from '../../../skills/bypass-proof-security/assets/fixes/node/safe-fetch.mjs';
+import { safeMerge, safeSet, safeJsonParse } from '../../../skills/bypass-proof-security/assets/fixes/node/safe-merge.mjs';
 
 const allowed = loadCorpus('redirect').assumptions.allowed_origins;
 const failures = (results) => results.filter((r) => r.status === 'fail').map((r) => `${r.kind} ${JSON.stringify(r.input)}: ${r.detail}`);

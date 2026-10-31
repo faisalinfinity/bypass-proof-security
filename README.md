@@ -1,6 +1,6 @@
-# Web Security Fixes
+# Bypass-Proof Security
 
-**`web-security-fixes`** is an agent skill that makes your coding agent fix web vulnerabilities **so the fix actually holds**, not just so it passes code review. It works with **Claude Code, Codex, Cursor, GitHub Copilot, Gemini CLI, OpenCode, Windsurf, Cline, Amp**, and any other agent that supports the open [Agent Skills](https://agentskills.io) format.
+**`bypass-proof-security`** is an agent skill that makes your coding agent fix web vulnerabilities **so the fix actually holds**, not just so it passes code review. It works with **Claude Code, Codex, Cursor, GitHub Copilot, Gemini CLI, OpenCode, Windsurf, Cline, Amp**, and any other agent that supports the open [Agent Skills](https://agentskills.io) format.
 
 > Offensive skills tell you how to break it. Checklists tell you what to look for. This one makes sure your fix actually holds.
 
@@ -72,19 +72,19 @@ SSRF and outbound requests · open redirects and URL parsing · XSS and HTML inj
   - `ipaddress.is_global` treats NAT64 loopback as global.
   - macOS and glibc resolve `0177.0.0.1` to different addresses.
 
-The tests live in this repo under `tests/` (`npm test`; Python: `uv run --with pytest --with httpx pytest tests/web-security-fixes/python`).
+The tests live in this repo under `tests/` (`npm test`; Python: `uv run --with pytest --with httpx pytest tests/bypass-proof-security/python`).
 
 ## Install
 
 ```bash
-npx skills add faisalinfinity/web-security-fixes --skill web-security-fixes
+npx skills add faisalinfinity/bypass-proof-security --skill bypass-proof-security
 ```
 
 The [`skills` CLI](https://github.com/vercel-labs/skills) detects your agents and asks where to install. To target specific agents, pass `-a`. Add `-g` to install for your user account instead of only the current project:
 
 | Agent | Command | Project path | User path (`-g`) |
 |---|---|---|---|
-| Claude Code | `npx skills add faisalinfinity/web-security-fixes --skill web-security-fixes -a claude-code` | `.claude/skills/` | `~/.claude/skills/` |
+| Claude Code | `npx skills add faisalinfinity/bypass-proof-security --skill bypass-proof-security -a claude-code` | `.claude/skills/` | `~/.claude/skills/` |
 | Codex | `… -a codex` | `.agents/skills/` | `~/.agents/skills/` |
 | Cursor | `… -a cursor` | `.agents/skills/` | `~/.cursor/skills/` |
 | GitHub Copilot | `… -a github-copilot` | `.agents/skills/` | `~/.copilot/skills/` |
@@ -97,11 +97,11 @@ The [`skills` CLI](https://github.com/vercel-labs/skills) detects your agents an
 **Manual install:**
 
 ```bash
-git clone --depth 1 https://github.com/faisalinfinity/web-security-fixes.git /tmp/wsf
-mkdir -p .agents/skills && cp -R /tmp/wsf/skills/web-security-fixes .agents/skills/   # Claude Code: .claude/skills/
+git clone --depth 1 https://github.com/faisalinfinity/bypass-proof-security.git /tmp/wsf
+mkdir -p .agents/skills && cp -R /tmp/wsf/skills/bypass-proof-security .agents/skills/   # Claude Code: .claude/skills/
 ```
 
-**Agents without skill support:** run `npx skills use faisalinfinity/web-security-fixes@web-security-fixes` to get a ready-to-paste prompt, or add this to `AGENTS.md`: *"For any security fix, security review, or code that handles URLs, redirects, files, HTML, tokens, webhooks, CORS/CSP/cookies, or money, follow `.agents/skills/web-security-fixes/SKILL.md`."*
+**Agents without skill support:** run `npx skills use faisalinfinity/bypass-proof-security@bypass-proof-security` to get a ready-to-paste prompt, or add this to `AGENTS.md`: *"For any security fix, security review, or code that handles URLs, redirects, files, HTML, tokens, webhooks, CORS/CSP/cookies, or money, follow `.agents/skills/bypass-proof-security/SKILL.md`."*
 
 ## Use
 
@@ -116,9 +116,9 @@ The skill triggers on security work, and on writing code in risky areas (outboun
 Or run the tools yourself (the install path is printed by `npx skills add`):
 
 ```bash
-node .agents/skills/web-security-fixes/scripts/scan.mjs .
-node .agents/skills/web-security-fixes/scripts/probe-validator.mjs redirect src/lib/redirect.ts safeNext
-node .agents/skills/web-security-fixes/scripts/check-headers.mjs https://staging.example.com/
+node .agents/skills/bypass-proof-security/scripts/scan.mjs .
+node .agents/skills/bypass-proof-security/scripts/probe-validator.mjs redirect src/lib/redirect.ts safeNext
+node .agents/skills/bypass-proof-security/scripts/check-headers.mjs https://staging.example.com/
 ```
 
 ## Safety

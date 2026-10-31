@@ -1,7 +1,7 @@
 // Verifies that every references/*.md#anchor link and every assets/ or scripts/ path mentioned in the skill exists.
 import fs from 'node:fs';
 import path from 'node:path';
-const SKILL = path.resolve(new URL('../../skills/web-security-fixes/', import.meta.url).pathname);
+const SKILL = path.resolve(new URL('../../skills/bypass-proof-security/', import.meta.url).pathname);
 const slug = (t) => t.trim().toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, '').replace(/\s/g, '-');
 const anchors = {};
 for (const f of fs.readdirSync(path.join(SKILL, 'references'))) {

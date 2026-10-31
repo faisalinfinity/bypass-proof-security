@@ -9,8 +9,8 @@ import jwt from 'jsonwebtoken';
 import * as jose from 'jose';
 import createDOMPurify from 'dompurify';
 import { JSDOM } from 'jsdom';
-import { runProbe, summarize } from '../../../skills/web-security-fixes/scripts/probe-validator.mjs';
-import { verifyStandardWebhook, verifyStripe, verifyGitHub } from '../../../skills/web-security-fixes/assets/fixes/node/verify-webhook.mjs';
+import { runProbe, summarize } from '../../../skills/bypass-proof-security/scripts/probe-validator.mjs';
+import { verifyStandardWebhook, verifyStripe, verifyGitHub } from '../../../skills/bypass-proof-security/assets/fixes/node/verify-webhook.mjs';
 
 test('Standard Webhooks published vector (Node helper)', () => {
   const args = { rawBody: '{"test": 2432232314}', id: 'msg_p5jXN8AQM9LWM0D4loKWxJek', timestamp: '1614265330', signatureHeader: 'v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE=', secrets: 'whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw' };

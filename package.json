@@ -1,11 +1,11 @@
 {
-  "name": "web-security-fixes-dev",
+  "name": "bypass-proof-security-dev",
   "private": true,
-  "description": "Test harness for the web-security-fixes skill. Not part of the installed skill.",
+  "description": "Test harness for the bypass-proof-security skill. Not part of the installed skill.",
   "type": "module",
   "scripts": {
-    "test": "node --test --test-timeout=120000 'tests/web-security-fixes/node/*.test.mjs' && node tests/web-security-fixes/scan/check-fixtures.mjs tests/web-security-fixes/scan/fixtures && node tests/web-security-fixes/check-links.mjs && node tests/web-security-fixes/check-frontmatter.mjs",
-    "test:python": "uv run --with pytest --with httpx pytest tests/web-security-fixes/python -q"
+    "test": "node --test --test-timeout=120000 'tests/bypass-proof-security/node/*.test.mjs' && node tests/bypass-proof-security/scan/check-fixtures.mjs tests/bypass-proof-security/scan/fixtures && node tests/bypass-proof-security/check-links.mjs && node tests/bypass-proof-security/check-frontmatter.mjs",
+    "test:python": "uv run --with pytest --with httpx pytest tests/bypass-proof-security/python -q"
   },
   "devDependencies": {
     "dompurify": "^3.4.17",
