@@ -1,0 +1,22 @@
+{
+  "class": "redos",
+  "description": "Pump strings for finding catastrophic backtracking in validators (email, URL, slug, and whitespace-trimming regexes).",
+  "convention": "Called as fn(input). The return value is ignored; only the time it takes matters. The probe runs each call in a worker thread with a hard timeout.",
+  "oracle": "For each pump, the probe times inputs of growing length. A pump fails if one call exceeds the budget (default 100 ms) or the time grows much faster than the input length.",
+  "pumps": [
+    { "prefix": "", "pump": "a", "suffix": "!", "why": "nested quantifiers over word characters: (\\w+)+, (a+)+, (a|a)*" },
+    { "prefix": "", "pump": "a", "suffix": "\u0000", "why": "same, with a control-character tail" },
+    { "prefix": "", "pump": " ", "suffix": "!", "why": "whitespace runs: \\s*$ trims, (\\s+\\w*)*" },
+    { "prefix": "a", "pump": " a", "suffix": "!", "why": "word + space alternation: ^(\\w+\\s?)*$" },
+    { "prefix": "", "pump": "a.", "suffix": "!", "why": "dotted labels: ^([a-z0-9]+\\.)+[a-z]+$ (domains, emails)" },
+    { "prefix": "a@", "pump": "a.", "suffix": "@", "why": "email local/domain part repetition" },
+    { "prefix": "", "pump": "-", "suffix": "!", "why": "slug-like ^([a-z0-9]+-?)+$" },
+    { "prefix": "http://", "pump": "a/", "suffix": "?", "why": "URL path repetition" },
+    { "prefix": "", "pump": "0", "suffix": "x", "why": "digit groups: ^(\\d+)*$, (\\d|\\d\\d)+" },
+    { "prefix": "<", "pump": "a", "suffix": "", "why": "unclosed tag scanners: <[^>]*>" },
+    { "prefix": "", "pump": "\t", "suffix": "x", "why": "tab runs" },
+    { "prefix": "", "pump": "aa", "suffix": "b", "why": "overlapping alternatives (a|aa)+" }
+  ],
+  "sizes": [16, 24, 32, 1000, 5000, 20000],
+  "budget_ms": 100
+}

@@ -1,0 +1,116 @@
+diff -ru fixture/src/app.js naive/src/app.js
+--- fixture/src/app.js	2026-11-01 01:43:22
++++ naive/src/app.js	2026-11-01 01:02:41
+@@ -8,7 +8,7 @@
+ import coupons from './routes/coupons.js';
+ export function createApp() {
+   const app = express();
+-  app.use(cors({ origin: true, credentials: true }));
++  app.use(cors({ origin: /app\.example\.com$/, credentials: true }));
+   for (const router of [webhooks, auth, preview, files, settings, coupons]) app.use(router);
+   return app;
+ }
+diff -ru fixture/src/lib/auth.js naive/src/lib/auth.js
+--- fixture/src/lib/auth.js	2026-11-01 01:43:22
++++ naive/src/lib/auth.js	2026-11-01 01:02:55
+@@ -1,9 +1,11 @@
+ import jwt from 'jsonwebtoken';
++import { config } from '../config.js';
+ // Access tokens are issued by https://auth.acme.example (HS256, iss/aud set, 15 min exp).
+ export function currentUser(req) {
+   const header = req.get('authorization') || '';
+   const token = header.replace(/^Bearer /, '');
+   if (!token) return null;
+-  const claims = jwt.decode(token);
++  let claims;
++  try { claims = jwt.verify(token, config.jwt.secret); } catch { return null; }
+   return claims && claims.sub ? { id: claims.sub, role: claims.role || 'user' } : null;
+ }
+diff -ru fixture/src/routes/auth.js naive/src/routes/auth.js
+--- fixture/src/routes/auth.js	2026-11-01 01:43:22
++++ naive/src/routes/auth.js	2026-11-01 01:02:41
+@@ -4,7 +4,7 @@
+ // After the hosted login page succeeds it sends the user here with ?next=<where they were going>.
+ r.get('/login/callback', (req, res) => {
+   const next = req.query.next || '/';
+-  res.redirect(302, next);
++  res.redirect(302, String(next).startsWith('/') ? next : '/');
+ });
+ r.get('/api/me', (req, res) => {
+   const user = currentUser(req);
+diff -ru fixture/src/routes/coupons.js naive/src/routes/coupons.js
+--- fixture/src/routes/coupons.js	2026-11-01 01:43:22
++++ naive/src/routes/coupons.js	2026-11-01 01:02:41
+@@ -7,6 +7,8 @@
+   const coupon = await db.get('coupons', code);
+   if (!coupon) return res.status(404).json({ error: 'unknown coupon' });
+   if (coupon.redeemedBy) return res.status(409).json({ error: 'already redeemed' });
++  const again = await db.get('coupons', code);
++  if (again.redeemedBy) return res.status(409).json({ error: 'already redeemed' });
+   await db.put('coupons', code, { ...coupon, redeemedBy: userId });
+   res.json({ ok: true, credit: 10 });
+ });
+diff -ru fixture/src/routes/files.js naive/src/routes/files.js
+--- fixture/src/routes/files.js	2026-11-01 01:43:22
++++ naive/src/routes/files.js	2026-11-01 01:02:41
+@@ -7,7 +7,7 @@
+ r.get('/files', async (req, res) => {
+   const name = String(req.query.name || '');
+   try {
+-    const data = await fs.readFile(path.join(config.filesDir, name), 'utf8');
++    const data = await fs.readFile(path.join(config.filesDir, name.replace(/\.\.\//g, '')), 'utf8');
+     res.type('text/plain').send(data);
+   } catch {
+     res.status(404).send('not found');
+diff -ru fixture/src/routes/preview.js naive/src/routes/preview.js
+--- fixture/src/routes/preview.js	2026-11-01 01:43:22
++++ naive/src/routes/preview.js	2026-11-01 01:02:41
+@@ -1,9 +1,15 @@
+ import { Router } from 'express';
++import dns from 'node:dns';
++const isPrivate = (ip) => /^(10\.|127\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|0\.)/.test(ip) || ip === '::1';
+ const r = Router();
+ // Link previews for chat messages: fetch the page and return its <title>.
+ r.get('/api/preview', async (req, res) => {
+   const url = String(req.query.url || '');
+   try {
++    const u = new URL(url);
++    if (!['http:', 'https:'].includes(u.protocol)) return res.status(400).json({ error: 'bad url' });
++    const { address } = await dns.promises.lookup(u.hostname);
++    if (isPrivate(address)) return res.status(400).json({ error: 'blocked' });
+     const upstream = await fetch(url);
+     const html = (await upstream.text()).slice(0, 200_000);
+     const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || null;
+diff -ru fixture/src/routes/settings.js naive/src/routes/settings.js
+--- fixture/src/routes/settings.js	2026-11-01 01:43:22
++++ naive/src/routes/settings.js	2026-11-01 01:02:41
+@@ -5,6 +5,7 @@
+ export const userSettings = new Map();
+ function deepMerge(target, source) {
+   for (const key in source) {
++    if (key === '__proto__') continue;
+     if (source[key] && typeof source[key] === 'object') {
+       if (!target[key]) target[key] = {};
+       deepMerge(target[key], source[key]);
+diff -ru fixture/src/routes/webhooks.js naive/src/routes/webhooks.js
+--- fixture/src/routes/webhooks.js	2026-11-01 01:43:22
++++ naive/src/routes/webhooks.js	2026-11-01 01:02:41
+@@ -1,11 +1,18 @@
+ import { Router } from 'express';
+ import express from 'express';
++import crypto from 'node:crypto';
++import { config } from '../config.js';
+ const r = Router();
+ export const processed = [];
+ // Payment provider webhook. Provider docs: every request carries
+ //   X-Payments-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of `${t}.${rawBody}` keyed with the endpoint secret>
+ // and "reject events whose timestamp is more than 5 minutes old".
+ r.post('/webhooks/payments', express.json(), (req, res) => {
++  const header = req.get('x-payments-signature') || '';
++  const t = (header.match(/t=(\d+)/) || [])[1];
++  const v1 = (header.match(/v1=([a-f0-9]+)/) || [])[1];
++  const expected = crypto.createHmac('sha256', config.webhookSecret).update(`${t}.${JSON.stringify(req.body)}`).digest('hex');
++  if (v1 !== expected) return res.status(400).json({ error: 'bad signature' });
+   const event = req.body;
+   processed.push(event.id);
+   res.json({ received: true });

@@ -1,0 +1,26 @@
+{
+  "class": "proto-pollution",
+  "description": "Payloads for JavaScript deep-merge, deep-clone, and set-by-path functions that handle user JSON (request bodies, query strings parsed with qs, config overrides).",
+  "convention": "merge mode calls fn(target, source) with source = JSON.parse(payload). JSON.parse creates a real own property named __proto__, exactly like a request body parser does. set mode calls fn(obj, path, value).",
+  "oracle": "After each call, Object.prototype and Array.prototype must not have gained a property. The probe deletes anything it added between runs.",
+  "merge_payloads": [
+    { "input": "{\"__proto__\": {\"pp_probe\": \"polluted\"}}", "why": "classic __proto__ key" },
+    { "input": "{\"constructor\": {\"prototype\": {\"pp_probe\": \"polluted\"}}}", "why": "constructor.prototype path; defeats __proto__-only filters" },
+    { "input": "{\"a\": {\"__proto__\": {\"pp_probe\": \"polluted\"}}}", "why": "nested; defeats top-level-only filters" },
+    { "input": "{\"a\": [{\"__proto__\": {\"pp_probe\": \"polluted\"}}]}", "why": "inside an array element" },
+    { "input": "{\"__proto__\": {\"__proto__\": {\"pp_probe\": \"polluted\"}}}", "why": "double __proto__" }
+  ],
+  "set_paths": [
+    { "input": "__proto__.pp_probe", "why": "dotted path" },
+    { "input": "constructor.prototype.pp_probe", "why": "constructor path" },
+    { "input": "a.__proto__.pp_probe", "why": "nested dotted path" },
+    { "input": "__proto__[pp_probe]", "why": "bracket syntax used by qs-style parsers" },
+    { "input": ["__proto__", "pp_probe"], "why": "array path form" },
+    { "input": ["constructor", "prototype", "pp_probe"], "why": "array constructor path" }
+  ],
+  "legit_merge": [
+    { "input": "{\"profile\": {\"name\": \"Ada\"}}", "expect_path": ["profile", "name"], "expect": "Ada" },
+    { "input": "{\"settings\": {\"theme\": {\"mode\": \"dark\"}}}", "expect_path": ["settings", "theme", "mode"], "expect": "dark" },
+    { "input": "{\"protocol\": \"https\", \"constructorName\": \"x\"}", "expect_path": ["constructorName"], "expect": "x", "why": "keys that merely contain 'proto' or 'constructor' must still work" }
+  ]
+}

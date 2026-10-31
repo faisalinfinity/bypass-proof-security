@@ -1,0 +1,3 @@
+<div>{{ comment.body|safe }}</div>                                                <!-- EXPECT xss-framework-escape-hatch -->
+<div>{{{ comment.body }}}</div>                                                   <!-- EXPECT xss-framework-escape-hatch -->
+<p>{{ comment.title }}</p>

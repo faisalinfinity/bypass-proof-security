@@ -1,0 +1,29 @@
+{
+  "class": "path",
+  "description": "User-supplied relative paths (download names, template names, upload subfolders) joined onto a base directory.",
+  "convention": "Called as fn(base, input) by default. Rejected = throws or returns false/null/undefined. true = the input is used as-is; a string = that string is used as the path.",
+  "assumptions": { "base": "/srv/app/uploads" },
+  "oracle": "The path the validator lets through is resolved against base. An attack passes if it is rejected or the result stays strictly inside base. Entries marked severity=warn only matter on Windows or for portability, and are reported without failing.",
+  "attacks": [
+    { "input": "../etc/passwd", "why": "basic traversal" },
+    { "input": "../../../../../../etc/passwd", "why": "deep traversal past the filesystem root" },
+    { "input": "/etc/passwd", "why": "absolute path; path.join keeps it under base, but path.resolve and Python os.path.join replace base entirely" },
+    { "input": "foo/../../etc/passwd", "why": "traversal after a legit-looking segment" },
+    { "input": "....//....//etc/passwd", "why": "defeats replace('../', ''): the output of that replace is ../../etc/passwd" },
+    { "input": "..././..././etc/passwd", "why": "defeats a single non-recursive '../' strip" },
+    { "input": "../uploads_evil/secret.txt", "why": "sibling directory sharing the prefix; defeats resolved.startsWith(base) without a trailing separator" },
+    { "input": "..", "why": "parent directory itself" },
+    { "input": "report.pdf\u0000.png", "why": "null byte; truncates the path in C-backed APIs and defeats extension checks", "severity": "strict" },
+    { "input": "..\\..\\windows\\win.ini", "why": "backslash traversal works on Windows", "severity": "warn" },
+    { "input": "C:\\Windows\\win.ini", "why": "drive-absolute path on Windows", "severity": "warn" },
+    { "input": "\\\\attacker.example\\share\\x", "why": "UNC path on Windows leaks NTLM credentials", "severity": "warn" }
+  ],
+  "legit": [
+    { "input": "report.pdf" },
+    { "input": "2024/q1/report.pdf" },
+    { "input": "a/b/../c.txt", "why": "normalizes to a/c.txt, still inside base" },
+    { "input": "file..name.txt", "why": "double dot inside a name is not traversal" },
+    { "input": "..hidden-but-legit.txt", "why": "name starting with '..' is not traversal; naive startsWith('..') checks reject it" },
+    { "input": "résumé final.pdf", "why": "unicode and spaces" }
+  ]
+}

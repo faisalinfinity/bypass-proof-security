@@ -1,0 +1,24 @@
+{
+  "class": "cors-origin",
+  "description": "Origin header values sent to a CORS policy that allows credentials. Your function decides whether to echo the origin in Access-Control-Allow-Origin.",
+  "convention": "Called as fn(origin). Rejected = throws or returns false/null/undefined. true = the request origin is echoed. A string = that string is sent as Access-Control-Allow-Origin.",
+  "assumptions": { "allowed_origins": ["https://trusted.example", "https://app.trusted.example"] },
+  "oracle": "An attack passes if it is rejected, or if the value sent is exactly one of allowed_origins (and not the attacker's origin). A legit input passes if the value sent equals the input.",
+  "attacks": [
+    { "input": "https://evil.example", "why": "arbitrary origin; reflecting it with credentials hands every visitor's session to the attacker" },
+    { "input": "null", "why": "sandboxed iframes and data: URLs send Origin: null; allowlisting 'null' lets any site in" },
+    { "input": "https://trusted.example.evil.example", "why": "defeats startsWith and unanchored regex checks" },
+    { "input": "https://eviltrusted.example", "why": "defeats endsWith('trusted.example') without a dot boundary" },
+    { "input": "https://trustedXexample", "why": "unescaped '.' in a regex matches any character" },
+    { "input": "https://evil.example/https://trusted.example", "why": "defeats includes()" },
+    { "input": "http://trusted.example", "why": "scheme downgrade: an attacker on the network can inject script into the http origin" },
+    { "input": "https://trusted.example:8443", "why": "a different port is a different origin (often a dev server or admin tool)" },
+    { "input": "https://sub.trusted.example", "why": "unlisted subdomain; with a *.trusted.example wildcard, any XSS or takeover on any subdomain reads your API" },
+    { "input": "https://trusted.example.", "why": "trailing-dot hostname is a distinct origin" },
+    { "input": "HTTPS://TRUSTED.EXAMPLE", "why": "browsers always send a lowercased origin; accepting this means you normalize somewhere you shouldn't", "severity": "warn" }
+  ],
+  "legit": [
+    { "input": "https://trusted.example" },
+    { "input": "https://app.trusted.example" }
+  ]
+}

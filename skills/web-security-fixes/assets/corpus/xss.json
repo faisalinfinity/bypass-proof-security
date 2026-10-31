@@ -1,0 +1,36 @@
+{
+  "class": "xss",
+  "description": "Inputs for an HTML sanitizer (user comments, Markdown output, rich-text fields). Escaping functions should neutralize all of these too.",
+  "convention": "Called as fn(html) and must return a string of HTML.",
+  "oracle": "The output must not contain an executable construct: a script element, an on* event-handler attribute, a javascript:/vbscript:/data:text/html URL in a URL attribute, an iframe/object/embed/base/meta-refresh/form-action vector, or srcdoc. If jsdom or linkedom is installed, the probe also parses the output, re-serializes it, and parses it again to catch mutation XSS. Legit entries must keep their expect_contains text.",
+  "attacks": [
+    { "input": "<script>alert(1)</script>", "why": "script element" },
+    { "input": "<img src=x onerror=alert(1)>", "why": "event handler" },
+    { "input": "<svg onload=alert(1)>", "why": "SVG event handler" },
+    { "input": "<svg><script>alert(1)</script></svg>", "why": "script inside SVG namespace" },
+    { "input": "<a href=\"javascript:alert(1)\">x</a>", "why": "javascript: URL" },
+    { "input": "<a href=\"  JaVaScRiPt:alert(1)\">x</a>", "why": "case + leading whitespace" },
+    { "input": "<a href=\"java&#x09;script:alert(1)\">x</a>", "why": "entity-encoded tab inside the scheme" },
+    { "input": "<a href=\"&#106;avascript:alert(1)\">x</a>", "why": "entity-encoded first letter" },
+    { "input": "<iframe src=\"javascript:alert(1)\"></iframe>", "why": "iframe" },
+    { "input": "<iframe srcdoc=\"<script>alert(1)</script>\"></iframe>", "why": "srcdoc" },
+    { "input": "<object data=\"data:text/html,<script>alert(1)</script>\"></object>", "why": "object with a data URL" },
+    { "input": "<embed src=\"javascript:alert(1)\">", "why": "embed" },
+    { "input": "<form action=\"javascript:alert(1)\"><button>x</button></form>", "why": "form action" },
+    { "input": "<button formaction=\"javascript:alert(1)\">x</button>", "why": "formaction attribute" },
+    { "input": "<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>", "why": "namespace-confusion mutation XSS" },
+    { "input": "<noscript><p title=\"</noscript><img src=x onerror=alert(1)>\">", "why": "noscript parsing differential (mXSS)" },
+    { "input": "<details open ontoggle=alert(1)>", "why": "less common event handler" },
+    { "input": "<base href=\"javascript:/\">", "why": "base tag hijacks relative URLs" },
+    { "input": "<meta http-equiv=\"refresh\" content=\"0;url=javascript:alert(1)\">", "why": "meta refresh" },
+    { "input": "<div style=\"background:url(javascript:alert(1))\">x</div>", "why": "legacy CSS URL vector", "severity": "warn" },
+    { "input": "<scr<script>ipt>alert(1)</script>", "why": "defeats a single-pass strip of '<script>'" },
+    { "input": "\"><img src=x onerror=alert(1)>", "why": "attribute breakout, for escaping functions used inside attributes" }
+  ],
+  "legit": [
+    { "input": "<b>bold</b> and <i>italic</i>", "expect_contains": "bold" },
+    { "input": "<a href=\"https://example.com/docs\">docs</a>", "expect_contains": "https://example.com/docs" },
+    { "input": "<p>Tom &amp; Jerry &lt;3</p>", "expect_contains": "Tom" },
+    { "input": "<ul><li>one</li><li>two</li></ul>", "expect_contains": "two" }
+  ]
+}

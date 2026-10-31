@@ -1,0 +1,17 @@
+{
+  "name": "web-security-fixes-dev",
+  "private": true,
+  "description": "Test harness for the web-security-fixes skill. Not part of the installed skill.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-timeout=120000 'tests/web-security-fixes/node/*.test.mjs' && node tests/web-security-fixes/scan/check-fixtures.mjs tests/web-security-fixes/scan/fixtures && node tests/web-security-fixes/check-links.mjs",
+    "test:python": "uv run --with pytest --with httpx pytest tests/web-security-fixes/python -q"
+  },
+  "devDependencies": {
+    "dompurify": "^3.4.17",
+    "jose": "^6.2.14",
+    "jsdom": "^29.1.1",
+    "jsonwebtoken": "^9.0.3",
+    "undici": "^7.30.1"
+  }
+}

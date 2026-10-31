@@ -1,0 +1,867 @@
+diff -ruN fixture/src/app.js reference/src/app.js
+--- fixture/src/app.js	2026-11-01 01:43:22
++++ reference/src/app.js	2026-11-01 01:02:41
+@@ -1,5 +1,6 @@
+ import express from 'express';
+ import cors from 'cors';
++import { config } from './config.js';
+ import auth from './routes/auth.js';
+ import preview from './routes/preview.js';
+ import files from './routes/files.js';
+@@ -8,7 +9,8 @@
+ import coupons from './routes/coupons.js';
+ export function createApp() {
+   const app = express();
+-  app.use(cors({ origin: true, credentials: true }));
++  const allowed = new Set([config.appOrigin]);
++  app.use(cors({ origin: (o, cb) => cb(null, o !== undefined && allowed.has(o) ? o : false), credentials: true }));
+   for (const router of [webhooks, auth, preview, files, settings, coupons]) app.use(router);
+   return app;
+ }
+diff -ruN fixture/src/lib/auth.js reference/src/lib/auth.js
+--- fixture/src/lib/auth.js	2026-11-01 01:43:22
++++ reference/src/lib/auth.js	2026-11-01 01:02:41
+@@ -1,9 +1,14 @@
+ import jwt from 'jsonwebtoken';
++import { config } from '../config.js';
+ // Access tokens are issued by https://auth.acme.example (HS256, iss/aud set, 15 min exp).
+ export function currentUser(req) {
+   const header = req.get('authorization') || '';
+   const token = header.replace(/^Bearer /, '');
+   if (!token) return null;
+-  const claims = jwt.decode(token);
++  let claims;
++  try {
++    claims = jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'], issuer: config.jwt.issuer, audience: config.jwt.audience });
++  } catch { return null; }
++  if (typeof claims.exp !== 'number') return null;
+   return claims && claims.sub ? { id: claims.sub, role: claims.role || 'user' } : null;
+ }
+diff -ruN fixture/src/lib/security/safe-fetch.mjs reference/src/lib/security/safe-fetch.mjs
+--- fixture/src/lib/security/safe-fetch.mjs	1970-01-01 05:30:00
++++ reference/src/lib/security/safe-fetch.mjs	2026-11-01 01:02:41
+@@ -0,0 +1,308 @@
++// safe-fetch.mjs: SSRF-safe outbound HTTP for Node 20+. Zero dependencies.
++//
++// Why this exists: the usual SSRF fix ("resolve the hostname, check the IP, then fetch")
++// has a time-of-check/time-of-use gap. fetch() resolves DNS again, and a short-TTL record
++// can answer with a public IP for the check and 127.0.0.1 for the connection (DNS
++// rebinding). Redirects are a second gap: the check runs on the first URL only.
++//
++// This helper validates the IP *at connect time* through the socket's `lookup` hook, so
++// the address that's checked is the address that's dialed. TLS still verifies the
++// certificate against the original hostname. Every redirect hop is re-validated, IP
++// literals (which skip DNS) are checked directly, and the module uses its own connection
++// pool so it can never reuse a socket that other code opened to an internal host.
++//
++// Usage:
++//   import { safeFetch } from './safe-fetch.mjs';
++//   const res = await safeFetch(userSuppliedUrl, { timeoutMs: 5000 });
++//   const data = await res.json();          // a standard fetch Response
++//
++// Defense in depth: also block egress at the network layer (egress proxy, security
++// group, or IMDSv2 with hop limit 1). Application checks are one layer, not the only one.
++
++import http from 'node:http';
++import https from 'node:https';
++import dns from 'node:dns';
++import net from 'node:net';
++
++export class SsrfBlockedError extends Error {
++  constructor(message) {
++    super(message);
++    this.name = 'SsrfBlockedError';
++    this.code = 'ERR_SSRF_BLOCKED';
++  }
++}
++
++export class SafeFetchError extends Error {
++  constructor(message, code) {
++    super(message);
++    this.name = 'SafeFetchError';
++    this.code = code;
++  }
++}
++
++// ---------------------------------------------------------------------------
++// IP policy
++// ---------------------------------------------------------------------------
++
++// Non-global IPv4 ranges (IANA special-purpose registry) plus CGNAT, which cloud providers
++// use for metadata services (Alibaba: 100.100.100.200).
++const V4_BLOCKED = new net.BlockList();
++for (const [addr, prefix] of [
++  ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
++  ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.0.2.0', 24],
++  ['192.88.99.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['198.51.100.0', 24],
++  ['203.0.113.0', 24], ['224.0.0.0', 4], ['240.0.0.0', 4],
++]) V4_BLOCKED.addSubnet(addr, prefix, 'ipv4');
++
++/** Expand an IPv6 string (no brackets, no zone) into eight 16-bit groups. */
++function ipv6Groups(ip) {
++  let s = ip;
++  const dotted = s.match(/^(.*:)(\d+\.\d+\.\d+\.\d+)$/); // trailing dotted quad, e.g. ::ffff:127.0.0.1
++  if (dotted) {
++    const p = dotted[2].split('.').map(Number);
++    s = `${dotted[1]}${((p[0] << 8) | p[1]).toString(16)}:${((p[2] << 8) | p[3]).toString(16)}`;
++  }
++  let parts = s.split(':');
++  if (s.includes('::')) {
++    const [l, r] = s.split('::');
++    const left = l ? l.split(':') : [];
++    const right = r ? r.split(':') : [];
++    parts = [...left, ...Array(8 - left.length - right.length).fill('0'), ...right];
++  }
++  return parts.map((h) => parseInt(h, 16));
++}
++
++function v4FromGroups(hi, lo) {
++  return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
++}
++
++/**
++ * True only for globally routable unicast addresses. Everything else (loopback, private,
++ * link-local, metadata, CGNAT, multicast, documentation, ULA) is rejected. IPv6 forms that
++ * embed an IPv4 address (IPv4-mapped, NAT64, 6to4) are judged by the embedded address.
++ * @param {string} ip
++ * @returns {boolean}
++ */
++export function isPublicAddress(ip) {
++  if (typeof ip !== 'string') return false;
++  const addr = ip.replace(/^\[|\]$/g, '').split('%')[0]; // strip brackets and zone id
++  const family = net.isIP(addr);
++  if (family === 4) return !V4_BLOCKED.check(addr, 'ipv4');
++  if (family !== 6) return false;
++
++  const g = ipv6Groups(addr.toLowerCase());
++  // ::ffff:0:0/96, IPv4-mapped
++  if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) return isPublicAddress(v4FromGroups(g[6], g[7]));
++  // 64:ff9b::/96, NAT64 well-known prefix (DNS64 networks use it for public IPv4 hosts)
++  if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return isPublicAddress(v4FromGroups(g[6], g[7]));
++  // 2002::/16, 6to4: the IPv4 address sits in groups 1-2
++  if (g[0] === 0x2002) return isPublicAddress(v4FromGroups(g[1], g[2]));
++  // Only 2000::/3 is global unicast; within it, carve out the special-purpose blocks.
++  if ((g[0] & 0xe000) !== 0x2000) return false;
++  if (g[0] === 0x2001 && g[1] < 0x0200) return false; // 2001::/23 IETF protocol assignments (Teredo, benchmarking, ORCHID)
++  if (g[0] === 0x2001 && g[1] === 0x0db8) return false; // 2001:db8::/32 documentation
++  if (g[0] === 0x3fff && g[1] < 0x1000) return false; // 3fff::/20 documentation
++  return true;
++}
++
++const BLOCKED_HOSTNAMES = /^(localhost|metadata|metadata\.google\.internal|instance-data)\.?$|\.(localhost|local|internal|home\.arpa)\.?$/i;
++
++/**
++ * Build a dns-style lookup function that refuses to return any non-allowed address.
++ * Pass it as `lookup` to http.request, net.connect, axios (`lookup`), or got (`dnsLookup`).
++ * If a hostname resolves to several addresses and ANY of them is blocked, the lookup fails:
++ * a name that points at both public and private space is not one you want to talk to.
++ * @param {(ip: string) => boolean} [isAllowedAddress]
++ */
++export function createGuardedLookup(isAllowedAddress = isPublicAddress) {
++  return function guardedLookup(hostname, options, callback) {
++    if (typeof options === 'function') { callback = options; options = {}; }
++    if (typeof options === 'number') options = { family: options };
++    dns.lookup(hostname, { ...options, all: true }, (err, addresses) => {
++      if (err) return callback(err);
++      const bad = addresses.find((a) => !isAllowedAddress(a.address));
++      if (bad || addresses.length === 0) {
++        return callback(new SsrfBlockedError(`${hostname} resolves to a blocked address (${bad ? bad.address : 'none'})`));
++      }
++      if (options.all) return callback(null, addresses);
++      return callback(null, addresses[0].address, addresses[0].family);
++    });
++  };
++}
++
++/**
++ * Synchronous checks on the URL itself: protocol, port, credentials, hostname, and IP
++ * literals (which never go through DNS, so the lookup hook can't see them).
++ * Returns the parsed URL. Throws SsrfBlockedError.
++ * @param {string | URL} input
++ * @param {{ allowedProtocols?: string[], allowedPorts?: number[] | null, isAllowedAddress?: (ip: string) => boolean, allowHostname?: (host: string) => boolean }} [opts]
++ */
++export function assertSafeUrl(input, opts = {}) {
++  const {
++    allowedProtocols = ['http:', 'https:'],
++    allowedPorts = [80, 443],
++    isAllowedAddress = isPublicAddress,
++    allowHostname,
++  } = opts;
++  let url;
++  try {
++    url = input instanceof URL ? new URL(input.href) : new URL(String(input));
++  } catch {
++    throw new SsrfBlockedError('not an absolute URL');
++  }
++  if (!allowedProtocols.includes(url.protocol)) throw new SsrfBlockedError(`protocol ${url.protocol} is not allowed`);
++  if (url.username || url.password) throw new SsrfBlockedError('credentials in URL are not allowed');
++  const port = url.port ? Number(url.port) : url.protocol === 'https:' ? 443 : 80;
++  if (allowedPorts && !allowedPorts.includes(port)) throw new SsrfBlockedError(`port ${port} is not allowed`);
++  const host = url.hostname.replace(/^\[|\]$/g, '');
++  if (!host) throw new SsrfBlockedError('missing host');
++  if (net.isIP(host)) {
++    if (!isAllowedAddress(host)) throw new SsrfBlockedError(`address ${host} is blocked`);
++  } else if (BLOCKED_HOSTNAMES.test(host) && !(allowHostname && allowHostname(host))) {
++    throw new SsrfBlockedError(`hostname ${host} is blocked`);
++  }
++  if (allowHostname && !net.isIP(host) && !allowHostname(host)) throw new SsrfBlockedError(`hostname ${host} is not on the allowlist`);
++  return url;
++}
++
++/**
++ * Validate-only check, including DNS: use it to reject bad URLs early, e.g. when a user
++ * saves a webhook URL. It is NOT a substitute for safeFetch at send time: DNS can change
++ * between this check and the request, so the request itself must be pinned.
++ * Resolves to the parsed URL; rejects with SsrfBlockedError.
++ * @param {string | URL} input
++ * @param {Parameters<typeof assertSafeUrl>[1]} [opts]
++ */
++export async function validateUrl(input, opts = {}) {
++  const url = assertSafeUrl(input, opts);
++  const host = url.hostname.replace(/^\[|\]$/g, '');
++  if (!net.isIP(host)) {
++    const lookup = createGuardedLookup(opts.isAllowedAddress || isPublicAddress);
++    await new Promise((resolve, reject) => lookup(host, { all: true }, (err) => (err ? reject(err) : resolve())));
++  }
++  return url;
++}
++
++// Dedicated pools: never share sockets with the rest of the app (a pooled socket to an
++// internal host, opened by trusted code, would otherwise be reused without a lookup).
++const agents = new Map();
++function agentFor(protocol, isAllowedAddress) {
++  const key = `${protocol}|${isAllowedAddress === isPublicAddress ? 'default' : 'custom'}`;
++  if (isAllowedAddress !== isPublicAddress) {
++    // A custom policy gets its own short-lived agent so policies never share sockets.
++    const Agent = protocol === 'https:' ? https.Agent : http.Agent;
++    return new Agent({ keepAlive: false, lookup: createGuardedLookup(isAllowedAddress) });
++  }
++  if (!agents.has(key)) {
++    const Agent = protocol === 'https:' ? https.Agent : http.Agent;
++    agents.set(key, new Agent({ keepAlive: true, maxSockets: 64, lookup: createGuardedLookup(isPublicAddress) }));
++  }
++  return agents.get(key);
++}
++
++const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
++const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
++const CROSS_ORIGIN_STRIP = ['authorization', 'cookie', 'proxy-authorization'];
++
++function requestOnce(url, { method, headers, body, signal, maxResponseBytes, isAllowedAddress }) {
++  return new Promise((resolve, reject) => {
++    const mod = url.protocol === 'https:' ? https : http;
++    const req = mod.request(url, {
++      method,
++      headers,
++      signal,
++      agent: agentFor(url.protocol, isAllowedAddress),
++      lookup: createGuardedLookup(isAllowedAddress),
++    }, (res) => {
++      const chunks = [];
++      let size = 0;
++      let failed = false;
++      res.on('data', (chunk) => {
++        if (failed) return;
++        size += chunk.length;
++        if (size > maxResponseBytes) {
++          failed = true;
++          const err = new SafeFetchError(`response exceeded ${maxResponseBytes} bytes`, 'ERR_RESPONSE_TOO_LARGE');
++          reject(err);
++          req.destroy(err);
++          return;
++        }
++        chunks.push(chunk);
++      });
++      res.on('end', () => {
++        if (!failed) resolve({ status: res.statusCode, rawHeaders: res.rawHeaders, location: res.headers.location, body: Buffer.concat(chunks) });
++      });
++      res.on('error', reject);
++    });
++    req.on('error', reject);
++    if (body != null) req.write(body);
++    req.end();
++  });
++}
++
++/**
++ * fetch-like GET/POST to an untrusted URL. Resolves to a standard `Response` whose `url`
++ * is the final URL after redirects. Rejects with SsrfBlockedError (code ERR_SSRF_BLOCKED)
++ * if any hop targets a blocked address, protocol, or port.
++ *
++ * @param {string | URL} input
++ * @param {{
++ *   method?: string, headers?: Record<string, string>, body?: string | Uint8Array,
++ *   maxRedirects?: number, timeoutMs?: number, maxResponseBytes?: number, signal?: AbortSignal,
++ *   allowedProtocols?: string[], allowedPorts?: number[] | null,
++ *   isAllowedAddress?: (ip: string) => boolean, allowHostname?: (host: string) => boolean,
++ * }} [init]
++ * @returns {Promise<Response>}
++ */
++export async function safeFetch(input, init = {}) {
++  const {
++    maxRedirects = 5,
++    timeoutMs = 10_000,
++    maxResponseBytes = 5 * 1024 * 1024,
++    isAllowedAddress = isPublicAddress,
++  } = init;
++  let method = (init.method || 'GET').toUpperCase();
++  let body = init.body;
++  let headers = Object.fromEntries(Object.entries(init.headers || {}).map(([k, v]) => [k.toLowerCase(), v]));
++  const timeout = AbortSignal.timeout(timeoutMs);
++  const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
++
++  let current = assertSafeUrl(input, init);
++  for (let hop = 0; ; hop++) {
++    let res;
++    try {
++      res = await requestOnce(current, { method, headers, body, signal, maxResponseBytes, isAllowedAddress });
++    } catch (err) {
++      if (err && err.name === 'AbortError' && timeout.aborted) throw new SafeFetchError(`timed out after ${timeoutMs} ms`, 'ERR_TIMEOUT');
++      throw err;
++    }
++
++    if (REDIRECT_STATUSES.has(res.status) && res.location) {
++      if (hop >= maxRedirects) throw new SafeFetchError(`more than ${maxRedirects} redirects`, 'ERR_TOO_MANY_REDIRECTS');
++      const next = assertSafeUrl(new URL(res.location, current), init); // re-validate every hop
++      if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === 'POST')) {
++        method = 'GET';
++        body = undefined;
++        delete headers['content-type'];
++        delete headers['content-length'];
++      }
++      if (next.origin !== current.origin) {
++        headers = { ...headers };
++        for (const h of CROSS_ORIGIN_STRIP) delete headers[h];
++      }
++      current = next;
++      continue;
++    }
++
++    const responseHeaders = new Headers();
++    for (let i = 0; i < res.rawHeaders.length; i += 2) {
++      try { responseHeaders.append(res.rawHeaders[i], res.rawHeaders[i + 1]); } catch { /* skip invalid header */ }
++    }
++    const response = new Response(NULL_BODY_STATUSES.has(res.status) || method === 'HEAD' ? null : res.body, {
++      status: res.status,
++      headers: responseHeaders,
++    });
++    Object.defineProperty(response, 'url', { value: current.href });
++    return response;
++  }
++}
+diff -ruN fixture/src/lib/security/safe-merge.mjs reference/src/lib/security/safe-merge.mjs
+--- fixture/src/lib/security/safe-merge.mjs	1970-01-01 05:30:00
++++ reference/src/lib/security/safe-merge.mjs	2026-11-01 01:02:41
+@@ -0,0 +1,77 @@
++// safe-merge.mjs: prototype-pollution-proof deep merge, set-by-path, and JSON parsing. Zero dependencies.
++//
++// Why: JSON.parse('{"__proto__": {"isAdmin": true}}') creates an *own* property named
++// "__proto__". A naive recursive merge then does target["__proto__"]["isAdmin"] = true,
++// which writes to Object.prototype, so every object in the process now has isAdmin.
++// Fixes that don't hold:
++//   - filtering only "__proto__"           {"constructor": {"prototype": {...}}} reaches the same place
++//   - filtering only at the top level      {"a": {"__proto__": {...}}} pollutes on the second level
++//   - Object.freeze(Object.prototype)      breaks many libraries and doesn't protect other prototypes
++// The fix that holds: skip the three dangerous keys at every level, recurse only into the
++// target's OWN plain-object properties, and validate the shape with a schema that strips
++// unknown keys (zod .strict()/.strip(), valibot, ajv removeAdditional) before merging.
++
++const FORBIDDEN = new Set(['__proto__', 'constructor', 'prototype']);
++const MAX_DEPTH = 64;
++
++export function isPlainObject(value) {
++  if (value === null || typeof value !== 'object') return false;
++  const proto = Object.getPrototypeOf(value);
++  return proto === Object.prototype || proto === null;
++}
++
++function cloneValue(value, depth) {
++  if (Array.isArray(value)) return value.map((v) => cloneValue(v, depth + 1));
++  if (isPlainObject(value)) return safeMerge({}, value, depth + 1);
++  return value;
++}
++
++/**
++ * Deep-merge `source` into `target` (mutates and returns target). Arrays are replaced, not merged.
++ * @template T
++ * @param {T} target
++ * @param {unknown} source
++ * @returns {T}
++ */
++export function safeMerge(target, source, depth = 0) {
++  if (depth > MAX_DEPTH) throw new RangeError('safeMerge: object nested too deeply');
++  if (!isPlainObject(source)) return target;
++  for (const key of Object.keys(source)) {
++    if (FORBIDDEN.has(key)) continue;
++    const value = source[key];
++    if (isPlainObject(value)) {
++      const existing = Object.hasOwn(target, key) && isPlainObject(target[key]) ? target[key] : {};
++      target[key] = safeMerge(existing, value, depth + 1);
++    } else {
++      target[key] = cloneValue(value, depth);
++    }
++  }
++  return target;
++}
++
++function parsePath(path) {
++  if (Array.isArray(path)) return path.map(String);
++  return String(path).replace(/\[([^\]]*)\]/g, '.$1').split('.').filter((s) => s !== '');
++}
++
++/**
++ * Set a nested value by path ('a.b.c', 'a[b][c]', or ['a','b','c']).
++ * Throws on any __proto__ / constructor / prototype segment.
++ */
++export function safeSet(obj, path, value) {
++  const parts = parsePath(path);
++  if (parts.length === 0) throw new TypeError('safeSet: empty path');
++  if (parts.some((p) => FORBIDDEN.has(p))) throw new TypeError('safeSet: forbidden path segment');
++  let cur = obj;
++  for (const part of parts.slice(0, -1)) {
++    if (!Object.hasOwn(cur, part) || cur[part] === null || typeof cur[part] !== 'object') cur[part] = {};
++    cur = cur[part];
++  }
++  cur[parts[parts.length - 1]] = value;
++  return obj;
++}
++
++/** JSON.parse that drops __proto__ / constructor / prototype keys at every level. */
++export function safeJsonParse(text) {
++  return JSON.parse(text, (key, value) => (FORBIDDEN.has(key) ? undefined : value));
++}
+diff -ruN fixture/src/lib/security/safe-path.mjs reference/src/lib/security/safe-path.mjs
+--- fixture/src/lib/security/safe-path.mjs	1970-01-01 05:30:00
++++ reference/src/lib/security/safe-path.mjs	2026-11-01 01:02:41
+@@ -0,0 +1,99 @@
++// safe-path.mjs: keep user-influenced paths inside a base directory. Node 18+.
++//
++// Fixes that don't hold:
++//   - p.replace('../', '')            '....//' becomes '../' after the replace
++//   - resolved.startsWith(base)       '/srv/uploads_evil' starts with '/srv/uploads'
++//   - path.join(base, p) alone        '../../etc/passwd' walks out
++//   - checking before decoding        '..%2f' turns into '../' after a later decode
++// The fix that holds: decode fully, resolve, then compare with path.relative (a real
++// path-segment comparison). For directories where users or other processes can create
++// symlinks, also compare the realpath.
++//
++// Usage:
++//   import { resolveInside } from './safe-path.mjs';
++//   const file = resolveInside(UPLOAD_DIR, req.params.name);   // throws on escape
++//   res.sendFile(file);
++
++import path from 'node:path';
++import fs from 'node:fs/promises';
++
++export class PathTraversalError extends Error {
++  constructor(message) {
++    super(message);
++    this.name = 'PathTraversalError';
++    this.code = 'ERR_PATH_TRAVERSAL';
++  }
++}
++
++function isStrictlyInside(base, target) {
++  const rel = path.relative(base, target);
++  return rel !== '' && rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel);
++}
++
++/**
++ * Lexically resolve `userPath` under `baseDir` and return the absolute path.
++ * Throws PathTraversalError if the result would leave baseDir (or equal it).
++ * Pass the *decoded* value: run it after any URL decoding your framework does.
++ * @param {string} baseDir
++ * @param {string} userPath
++ * @param {{ allowBackslash?: boolean }} [opts]  backslashes are rejected by default
++ *   because they're separators on Windows; keep it that way unless names really need them.
++ * @returns {string}
++ */
++export function resolveInside(baseDir, userPath, opts = {}) {
++  if (typeof userPath !== 'string' || userPath.length === 0) throw new PathTraversalError('empty path');
++  if (userPath.includes('\0')) throw new PathTraversalError('null byte in path');
++  if (!opts.allowBackslash && userPath.includes('\\')) throw new PathTraversalError('backslash in path');
++  const base = path.resolve(baseDir);
++  const target = path.resolve(base, userPath);
++  if (!isStrictlyInside(base, target)) throw new PathTraversalError('path escapes base directory');
++  return target;
++}
++
++/**
++ * Like resolveInside, but also follows symlinks: the *real* location must be inside the
++ * real base. Use when the directory can contain symlinks (user uploads extracted from
++ * archives, shared volumes). If the target doesn't exist yet (you're about to create it),
++ * the parent directory's real path is checked instead.
++ * There is still a small race if an attacker can swap a directory for a symlink between
++ * this check and your open(). Where that's possible, open with O_NOFOLLOW or keep
++ * attacker-writable trees on a separate volume.
++ * @param {string} baseDir
++ * @param {string} userPath
++ * @returns {Promise<string>}
++ */
++export async function realpathInside(baseDir, userPath, opts = {}) {
++  const lexical = resolveInside(baseDir, userPath, opts);
++  const realBase = await fs.realpath(baseDir);
++  let real;
++  try {
++    real = await fs.realpath(lexical);
++  } catch (err) {
++    if (err.code !== 'ENOENT') throw err;
++    real = path.join(await fs.realpath(path.dirname(lexical)), path.basename(lexical));
++  }
++  if (!isStrictlyInside(realBase, real)) throw new PathTraversalError('path escapes base directory via symlink');
++  return real;
++}
++
++const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i;
++
++/**
++ * Turn an untrusted filename (e.g. an upload's original name) into a safe single path
++ * segment for display or Content-Disposition. For storage, prefer a server-generated name
++ * (crypto.randomUUID()) and keep the original only as metadata.
++ * @param {string} name
++ * @param {{ maxLength?: number, fallback?: string }} [opts]
++ */
++export function safeFilename(name, opts = {}) {
++  const { maxLength = 200, fallback = 'file' } = opts;
++  let s = String(name ?? '').normalize('NFC');
++  s = s.split(/[\\/]/).pop() || ''; // drop any directory part, for either separator
++  s = s.replace(/[\u0000-\u001f\u007f<>:"|?*]/g, '_').replace(/^[.\s]+|[.\s]+$/g, '');
++  if (WINDOWS_RESERVED.test(s)) s = '_' + s;
++  if (s.length > maxLength) {
++    const ext = path.extname(s).slice(0, 16);
++    s = s.slice(0, maxLength - ext.length) + ext;
++  }
++  return s || fallback;
++}
+diff -ruN fixture/src/lib/security/safe-redirect.mjs reference/src/lib/security/safe-redirect.mjs
+--- fixture/src/lib/security/safe-redirect.mjs	1970-01-01 05:30:00
++++ reference/src/lib/security/safe-redirect.mjs	2026-11-01 01:02:41
+@@ -0,0 +1,70 @@
++// safe-redirect.mjs: open-redirect-proof handling of ?next= / ?returnTo= values. Node 18+ / browsers.
++//
++// String checks like startsWith('/'), !startsWith('//'), includes(host) or a regex all
++// lose to inputs the browser normalizes differently from your check: '/\evil.com',
++// '/\t/evil.com', ' //evil.com', 'https://trusted.com@evil.com', 'java\tscript:'.
++// The robust fix is to let the browser's own algorithm (WHATWG URL) parse the value,
++// then decide on the parsed origin, and emit a value we re-serialized ourselves.
++//
++// Usage (Express):
++//   import { safeRedirectTarget } from './safe-redirect.mjs';
++//   res.redirect(303, safeRedirectTarget(req.query.next, { allowedOrigins: ['https://app.example.com'] }));
++
++const BASE = 'https://redirect-base.invalid';
++
++/**
++ * Returns a value that is safe to put in a Location header (or window.location):
++ * either a same-origin path ("/x?y#z") or an absolute URL on an allowed origin.
++ * Anything else returns `fallback`.
++ *
++ * @param {unknown} input           untrusted value, e.g. req.query.next
++ * @param {{ allowedOrigins?: string[], fallback?: string, maxLength?: number }} [opts]
++ *   allowedOrigins: exact origins such as 'https://app.example.com' (scheme + host + port).
++ *                   Exact match only. Don't use suffix or regex matching here.
++ * @returns {string}
++ */
++export function safeRedirectTarget(input, opts = {}) {
++  const { allowedOrigins = [], fallback = '/', maxLength = 2048 } = opts;
++  if (typeof input !== 'string' || input.length === 0 || input.length > maxLength) return fallback;
++
++  let url;
++  try {
++    url = new URL(input, BASE); // same parser browsers use: strips tabs/newlines, maps \ to /, etc.
++  } catch {
++    return fallback;
++  }
++
++  if (url.origin === BASE) {
++    // Relative input. Re-serialize the path ourselves, collapsing leading slashes:
++    // '/.//evil.com' and '/x/..//evil.com' normalize to the pathname '//evil.com',
++    // which would become protocol-relative if emitted as-is.
++    return '/' + url.pathname.replace(/^\/+/, '') + url.search + url.hash;
++  }
++
++  if ((url.protocol === 'https:' || url.protocol === 'http:') && allowedOrigins.includes(url.origin)) {
++    return url.href;
++  }
++  return fallback;
++}
++
++/**
++ * Boolean form, for validation at write time (e.g. when saving an OAuth client's
++ * redirect_uri). Prefer safeRedirectTarget at use time.
++ * @param {unknown} input
++ * @param {{ allowedOrigins?: string[] }} [opts]
++ */
++export function isSafeRedirect(input, opts = {}) {
++  const marker = '\u0000fallback';
++  return safeRedirectTarget(input, { ...opts, fallback: marker }) !== marker;
++}
++
++/**
++ * OAuth/OIDC redirect_uri check: exact string match against pre-registered URIs.
++ * The OAuth 2.0 Security BCP (RFC 9700) requires exact matching. Prefix, wildcard, and
++ * "same host" matching have each caused real account-takeover bugs.
++ * @param {string} redirectUri
++ * @param {string[]} registered
++ */
++export function isRegisteredRedirectUri(redirectUri, registered) {
++  return typeof redirectUri === 'string' && registered.includes(redirectUri);
++}
+diff -ruN fixture/src/lib/security/tokens.mjs reference/src/lib/security/tokens.mjs
+--- fixture/src/lib/security/tokens.mjs	1970-01-01 05:30:00
++++ reference/src/lib/security/tokens.mjs	2026-11-01 01:02:41
+@@ -0,0 +1,43 @@
++// tokens.mjs: secrets, tokens, and constant-time comparison. Node 18+, zero dependencies.
++//
++// Fixes that don't hold:
++//   - Math.random() / Date.now() / uuid v1 for tokens   predictable; use crypto.randomBytes
++//   - token === stored                                  timing leak; use constant-time compare
++//   - storing reset tokens / API keys in plaintext       a DB read becomes account takeover; store a hash
++//   - bcrypt for 256-bit random tokens                  unnecessary and slow; SHA-256 is right for
++//                                                       high-entropy tokens (bcrypt/argon2 are for passwords)
++
++import { randomBytes, createHash, createHmac, timingSafeEqual } from 'node:crypto';
++
++/** URL-safe random token. 32 bytes = 256 bits. */
++export function randomToken(bytes = 32) {
++  return randomBytes(bytes).toString('base64url');
++}
++
++/** Hash a high-entropy token for storage (password reset, email verify, API keys, sessions). */
++export function hashToken(token) {
++  return createHash('sha256').update(String(token)).digest('hex');
++}
++
++const compareKey = randomBytes(32);
++
++/**
++ * Constant-time string equality that's also safe for unequal lengths: both sides are
++ * HMAC'd first, so the comparison always runs over 32 bytes and leaks nothing about length.
++ */
++export function safeEqual(a, b) {
++  if (typeof a !== 'string' || typeof b !== 'string') return false;
++  const ha = createHmac('sha256', compareKey).update(a).digest();
++  const hb = createHmac('sha256', compareKey).update(b).digest();
++  return timingSafeEqual(ha, hb);
++}
++
++/**
++ * One-time token record for password reset / magic links / email verification.
++ * Email the `token`; store only `tokenHash` + `expiresAt`. To redeem, hash the presented token,
++ * look it up, check expiry, and delete the row in the same transaction (single use).
++ */
++export function issueOneTimeToken(ttlMs = 30 * 60 * 1000) {
++  const token = randomToken(32);
++  return { token, tokenHash: hashToken(token), expiresAt: new Date(Date.now() + ttlMs) };
++}
+diff -ruN fixture/src/lib/security/verify-webhook.mjs reference/src/lib/security/verify-webhook.mjs
+--- fixture/src/lib/security/verify-webhook.mjs	1970-01-01 05:30:00
++++ reference/src/lib/security/verify-webhook.mjs	2026-11-01 01:02:41
+@@ -0,0 +1,95 @@
++// verify-webhook.mjs: signature verification for inbound webhooks. Node 18+, zero dependencies.
++//
++// Fixes that don't hold:
++//   - computing the HMAC over JSON.stringify(req.body)   re-serialization changes bytes (key
++//     order, whitespace, unicode escapes), so valid events fail and people turn checks off.
++//     Always sign-check the RAW body bytes.
++//   - sig === expected / sig == expected                  leaks the match length through timing
++//   - verifying the signature but not the timestamp       old captured events can be replayed forever
++//   - one secret only                                     rotation means downtime, so nobody rotates
++//
++// Get the raw body:
++//   Express:  app.post('/hook', express.raw({ type: 'application/json' }), (req) => req.body /* Buffer */)
++//   Next.js:  export async function POST(req) { const raw = await req.text(); ... }
++//   Fastify:  fastify.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body, done) => done(null, body))
++//   Hono:     const raw = await c.req.text()
++//
++// After verifying, also dedupe by event id (store processed ids with a TTL); the timestamp
++// window narrows replay but doesn't stop a replay inside the window.
++
++import { createHmac, timingSafeEqual } from 'node:crypto';
++
++function toBuffer(body) {
++  if (Buffer.isBuffer(body)) return body;
++  if (body instanceof Uint8Array) return Buffer.from(body.buffer, body.byteOffset, body.byteLength);
++  if (typeof body === 'string') return Buffer.from(body, 'utf8');
++  throw new TypeError('rawBody must be the raw request bytes (Buffer, Uint8Array, or string), not a parsed object');
++}
++
++function equalBytes(a, b) {
++  return a.length === b.length && timingSafeEqual(a, b);
++}
++
++function withinTolerance(timestampSec, toleranceSec, nowMs) {
++  if (!/^\d{1,12}$/.test(String(timestampSec))) return false;
++  return Math.abs(nowMs / 1000 - Number(timestampSec)) <= toleranceSec;
++}
++
++/**
++ * Generic HMAC check. `signature` is the value from the header with any "sha256=" prefix removed.
++ * Pass several secrets during rotation: any match is accepted.
++ * @param {{ payload: Buffer|Uint8Array|string, signature: string, secrets: string|Buffer|Array<string|Buffer>, algorithm?: string, encoding?: 'hex'|'base64' }} o
++ */
++export function verifyHmac({ payload, signature, secrets, algorithm = 'sha256', encoding = 'hex' }) {
++  if (typeof signature !== 'string' || signature.length === 0) return false;
++  const given = Buffer.from(signature, encoding);
++  const body = toBuffer(payload);
++  return [].concat(secrets).some((secret) => equalBytes(given, createHmac(algorithm, secret).update(body).digest()));
++}
++
++/** GitHub: X-Hub-Signature-256: sha256=<hex>. No timestamp, so dedupe on X-GitHub-Delivery. */
++export function verifyGitHub({ rawBody, signatureHeader, secrets }) {
++  if (typeof signatureHeader !== 'string' || !signatureHeader.startsWith('sha256=')) return false;
++  return verifyHmac({ payload: rawBody, signature: signatureHeader.slice(7), secrets });
++}
++
++/**
++ * Stripe: Stripe-Signature: t=<unix>,v1=<hex>[,v1=<hex>...]; signed payload is `${t}.${rawBody}`.
++ * The endpoint secret (whsec_...) is used as the HMAC key as-is.
++ */
++export function verifyStripe({ rawBody, signatureHeader, secrets, toleranceSec = 300, now = Date.now() }) {
++  if (typeof signatureHeader !== 'string') return false;
++  let t;
++  const v1 = [];
++  for (const part of signatureHeader.split(',')) {
++    const i = part.indexOf('=');
++    const k = part.slice(0, i).trim();
++    const v = part.slice(i + 1).trim();
++    if (k === 't') t = v;
++    else if (k === 'v1') v1.push(v);
++  }
++  if (!t || v1.length === 0 || !withinTolerance(t, toleranceSec, now)) return false;
++  const payload = Buffer.concat([Buffer.from(`${t}.`), toBuffer(rawBody)]);
++  return v1.some((sig) => verifyHmac({ payload, signature: sig, secrets }));
++}
++
++/** Slack: X-Slack-Signature: v0=<hex>, X-Slack-Request-Timestamp; basestring `v0:${ts}:${rawBody}`. */
++export function verifySlack({ rawBody, signatureHeader, timestampHeader, secrets, toleranceSec = 300, now = Date.now() }) {
++  if (typeof signatureHeader !== 'string' || !signatureHeader.startsWith('v0=')) return false;
++  if (!withinTolerance(timestampHeader, toleranceSec, now)) return false;
++  const payload = Buffer.concat([Buffer.from(`v0:${timestampHeader}:`), toBuffer(rawBody)]);
++  return verifyHmac({ payload, signature: signatureHeader.slice(3), secrets });
++}
++
++/**
++ * Standard Webhooks (standardwebhooks.com), used by Svix, Clerk, Resend, Supabase and others.
++ * Headers: webhook-id, webhook-timestamp, webhook-signature ("v1,<base64> v1,<base64>").
++ * Signed content: `${id}.${timestamp}.${rawBody}`; key = base64-decoded secret without "whsec_".
++ */
++export function verifyStandardWebhook({ rawBody, id, timestamp, signatureHeader, secrets, toleranceSec = 300, now = Date.now() }) {
++  if (!id || typeof signatureHeader !== 'string' || !withinTolerance(timestamp, toleranceSec, now)) return false;
++  const keys = [].concat(secrets).map((s) => Buffer.from(String(s).replace(/^whsec_/, ''), 'base64'));
++  const payload = Buffer.concat([Buffer.from(`${id}.${timestamp}.`), toBuffer(rawBody)]);
++  const sigs = signatureHeader.split(' ').filter((s) => s.startsWith('v1,')).map((s) => s.slice(3));
++  return sigs.some((sig) => verifyHmac({ payload, signature: sig, secrets: keys, encoding: 'base64' }));
++}
+diff -ruN fixture/src/routes/auth.js reference/src/routes/auth.js
+--- fixture/src/routes/auth.js	2026-11-01 01:43:22
++++ reference/src/routes/auth.js	2026-11-01 01:02:41
+@@ -1,10 +1,12 @@
+ import { Router } from 'express';
+ import { currentUser } from '../lib/auth.js';
++import { safeRedirectTarget } from '../lib/security/safe-redirect.mjs';
++import { config } from '../config.js';
+ const r = Router();
+ // After the hosted login page succeeds it sends the user here with ?next=<where they were going>.
+ r.get('/login/callback', (req, res) => {
+   const next = req.query.next || '/';
+-  res.redirect(302, next);
++  res.redirect(302, safeRedirectTarget(next, { allowedOrigins: [config.appOrigin] }));
+ });
+ r.get('/api/me', (req, res) => {
+   const user = currentUser(req);
+diff -ruN fixture/src/routes/coupons.js reference/src/routes/coupons.js
+--- fixture/src/routes/coupons.js	2026-11-01 01:43:22
++++ reference/src/routes/coupons.js	2026-11-01 01:02:41
+@@ -6,8 +6,8 @@
+   const { code, userId } = req.body;
+   const coupon = await db.get('coupons', code);
+   if (!coupon) return res.status(404).json({ error: 'unknown coupon' });
+-  if (coupon.redeemedBy) return res.status(409).json({ error: 'already redeemed' });
+-  await db.put('coupons', code, { ...coupon, redeemedBy: userId });
++  const changed = await db.updateWhere('coupons', code, (c) => !c.redeemedBy, { redeemedBy: userId });
++  if (changed === 0) return res.status(409).json({ error: 'already redeemed' });
+   res.json({ ok: true, credit: 10 });
+ });
+ export default r;
+diff -ruN fixture/src/routes/files.js reference/src/routes/files.js
+--- fixture/src/routes/files.js	2026-11-01 01:43:22
++++ reference/src/routes/files.js	2026-11-01 01:02:41
+@@ -2,12 +2,13 @@
+ import fs from 'node:fs/promises';
+ import path from 'node:path';
+ import { config } from '../config.js';
++import { resolveInside } from '../lib/security/safe-path.mjs';
+ const r = Router();
+ // Download a customer document by name, e.g. /files?name=2024/q1/report.txt
+ r.get('/files', async (req, res) => {
+   const name = String(req.query.name || '');
+   try {
+-    const data = await fs.readFile(path.join(config.filesDir, name), 'utf8');
++    const data = await fs.readFile(resolveInside(config.filesDir, name), 'utf8');
+     res.type('text/plain').send(data);
+   } catch {
+     res.status(404).send('not found');
+diff -ruN fixture/src/routes/preview.js reference/src/routes/preview.js
+--- fixture/src/routes/preview.js	2026-11-01 01:43:22
++++ reference/src/routes/preview.js	2026-11-01 01:02:41
+@@ -1,10 +1,11 @@
+ import { Router } from 'express';
++import { safeFetch } from '../lib/security/safe-fetch.mjs';
+ const r = Router();
+ // Link previews for chat messages: fetch the page and return its <title>.
+ r.get('/api/preview', async (req, res) => {
+   const url = String(req.query.url || '');
+   try {
+-    const upstream = await fetch(url);
++    const upstream = await safeFetch(url, { timeoutMs: 5000, maxResponseBytes: 1_000_000 });
+     const html = (await upstream.text()).slice(0, 200_000);
+     const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || null;
+     res.json({ url, status: upstream.status, title, snippet: html.slice(0, 200) });
+diff -ruN fixture/src/routes/settings.js reference/src/routes/settings.js
+--- fixture/src/routes/settings.js	2026-11-01 01:43:22
++++ reference/src/routes/settings.js	2026-11-01 01:02:41
+@@ -1,5 +1,6 @@
+ import { Router } from 'express';
+ import express from 'express';
++import { safeMerge } from '../lib/security/safe-merge.mjs';
+ const r = Router();
+ const defaults = { theme: 'light', notifications: { email: true, sms: false } };
+ export const userSettings = new Map();
+@@ -17,13 +18,13 @@
+ r.patch('/api/settings', express.json(), (req, res) => {
+   const uid = req.get('x-user-id') || 'anon';
+   const current = userSettings.get(uid) || structuredClone(defaults);
+-  userSettings.set(uid, deepMerge(current, req.body));
++  userSettings.set(uid, safeMerge(current, req.body));
+   res.json(userSettings.get(uid));
+ });
+ // Admin-only endpoint: admins are users whose session object has isAdmin.
+ r.get('/api/admin/stats', (req, res) => {
+   const session = {};
+-  if (!session.isAdmin) return res.status(403).json({ error: 'forbidden' });
++  if (!Object.hasOwn(session, 'isAdmin') || session.isAdmin !== true) return res.status(403).json({ error: 'forbidden' });
+   res.json({ users: 1234 });
+ });
+ export default r;
+diff -ruN fixture/src/routes/webhooks.js reference/src/routes/webhooks.js
+--- fixture/src/routes/webhooks.js	2026-11-01 01:43:22
++++ reference/src/routes/webhooks.js	2026-11-01 01:02:41
+@@ -1,12 +1,15 @@
+ import { Router } from 'express';
+ import express from 'express';
++import { verifyStripe } from '../lib/security/verify-webhook.mjs';
++import { config } from '../config.js';
+ const r = Router();
+ export const processed = [];
+ // Payment provider webhook. Provider docs: every request carries
+ //   X-Payments-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of `${t}.${rawBody}` keyed with the endpoint secret>
+ // and "reject events whose timestamp is more than 5 minutes old".
+-r.post('/webhooks/payments', express.json(), (req, res) => {
+-  const event = req.body;
++r.post('/webhooks/payments', express.raw({ type: 'application/json' }), (req, res) => {
++  if (!verifyStripe({ rawBody: req.body, signatureHeader: req.get('x-payments-signature'), secrets: [config.webhookSecret] })) return res.status(400).json({ error: 'bad signature' });
++  const event = JSON.parse(req.body);
+   processed.push(event.id);
+   res.json({ received: true });
+ });

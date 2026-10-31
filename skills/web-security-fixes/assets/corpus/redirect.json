@@ -1,0 +1,44 @@
+{
+  "class": "redirect",
+  "description": "Values for a ?next= / ?returnTo= / redirect_uri parameter. Your validator decides what goes into the Location header.",
+  "convention": "Rejected = throws, or returns false/null/undefined. If it returns true, the original input is used as the Location. If it returns a string, that string is used as the Location.",
+  "assumptions": {
+    "current_url": "https://trusted.example/account/login",
+    "allowed_origins": ["https://trusted.example", "https://app.trusted.example"]
+  },
+  "oracle": "The Location value is resolved the way a browser does (WHATWG URL, relative to current_url). An attack passes if it is rejected or the destination is http(s) on an allowed origin. A legit input passes if it is accepted and lands on the expected destination.",
+  "attacks": [
+    { "input": "https://evil.example/", "why": "plain external URL" },
+    { "input": "//evil.example", "why": "protocol-relative; defeats startsWith('/')" },
+    { "input": "///evil.example", "why": "extra slashes are collapsed by browsers" },
+    { "input": "/\\evil.example", "why": "browsers treat \\ as / in http(s) URLs; defeats startsWith('/') && !startsWith('//')" },
+    { "input": "\\/evil.example", "why": "backslash-slash" },
+    { "input": "\\\\evil.example", "why": "double backslash" },
+    { "input": "/\t/evil.example", "why": "tab is stripped by browsers, leaving //evil.example" },
+    { "input": " //evil.example", "why": "leading space is stripped by browsers; Python urlparse sees no netloc" },
+    { "input": "http:/\\evil.example", "why": "scheme + slash/backslash" },
+    { "input": "/.//evil.example", "why": "safe as-is, but validators that re-emit new URL(x).pathname turn it into //evil.example" },
+    { "input": "/x/..//evil.example", "why": "dot-segment removal also yields the pathname //evil.example" },
+    { "input": "http:evil.example", "why": "special scheme without slashes; absolute when the current page is https" },
+    { "input": "https://trusted.example.evil.example/", "why": "defeats startsWith('https://trusted.example')" },
+    { "input": "https://trusted.example@evil.example/", "why": "userinfo; defeats startsWith and includes checks" },
+    { "input": "https://evil.example\\@trusted.example", "why": "parser differential: Python urlparse().hostname says trusted.example, browsers go to evil.example" },
+    { "input": "https://evil.example/https://trusted.example", "why": "defeats includes('trusted.example')" },
+    { "input": "https://evil.example?trusted.example", "why": "defeats endsWith/includes checks" },
+    { "input": "https://eviltrusted.example/", "why": "defeats endsWith('trusted.example') without a dot boundary" },
+    { "input": "http://trusted.example/", "why": "scheme downgrade to http on an allowed host" },
+    { "input": "javascript:alert(document.domain)", "why": "script URL; XSS if used in href or window.location" },
+    { "input": "JaVaScRiPt:alert(1)", "why": "scheme is case-insensitive" },
+    { "input": "java\tscript:alert(1)", "why": "tab inside the scheme is stripped by browsers" },
+    { "input": "\u0001javascript:alert(1)", "why": "leading control characters are stripped by browsers" },
+    { "input": "data:text/html,<script>alert(1)</script>", "why": "data URL" }
+  ],
+  "legit": [
+    { "input": "/dashboard", "expect": "https://trusted.example/dashboard" },
+    { "input": "/settings?tab=profile", "expect": "https://trusted.example/settings?tab=profile" },
+    { "input": "/search?q=a%2Fb#results", "expect": "https://trusted.example/search?q=a%2Fb#results" },
+    { "input": "/a/b/../c", "expect": "https://trusted.example/a/c" },
+    { "input": "https://trusted.example/billing", "expect": "https://trusted.example/billing" },
+    { "input": "https://app.trusted.example/projects/42", "expect": "https://app.trusted.example/projects/42" }
+  ]
+}
